@@ -1,40 +1,58 @@
-import requests
+"""
+A simple Flask application for receiving S3 events via an SNS topic.
 
-from flask import Flask, request
+It handles the initial subscription-confirmation step, and then
+downloads all objects mentioned in any subsequent S3 event messages.
+
+"""
+from urllib import request
+import json
+import logging
+import os.path
+
+import boto3
+import flask
 
 
-app = Flask(__name__)
+app = flask.Flask(__name__)
+app.logger.setLevel(logging.INFO)
 
 
-@app.route('/')
-def root():
-    return 'All OK'
+S3 = boto3.client('s3')
 
 
 @app.route('/target', methods=['POST'])
 def target():
-    app.logger.error('Received message')
+    body = flask.request.get_json(force=True)
 
-    app.logger.error('Getting JSON')
-    message = request.get_json(force=True)
-    app.logger.error('Message: {!r}'.format(message))
+    # In a production implementation we would verify the content
+    # signature before continuing.
 
-    # TODO: Verify signature
-    app.logger.error('Verifying signature')
-
-    message_type = message['Type']
-    app.logger.error('Message type: {!r}'.format(message_type))
+    message_type = body['Type']
     if message_type == 'SubscriptionConfirmation':
-        subscribe_url = message['SubscribeURL']
-        app.logger.error('Subscribe URL: {!r}'.format(subscribe_url))
-        #requests.get(subscribe_url)
+        # In a production implementation we would verify that we were
+        # expecting to subscribe to the relevant SNS topic.
+
+        # Confirm that we want to subscribe.
+        request.urlopen(body['SubscribeURL'])
+
+        app.logger.info('Confirmed subscription to {}'.format(
+            body['TopicArn']))
+
     elif message_type == 'Notification':
-        pass
+        handle_s3_event_message(body['Message'])
+
     return 'OK'
 
 
-if __name__ == '__main__':
-    import logging
-    app.logger.setLevel(logging.DEBUG)
-
-    app.run(host='els049', port=5000, use_reloader=True)#, ssl_context=('cert.crt', 'key.key'))
+def handle_s3_event_message(data):
+    message = json.loads(data)
+    for record in message['Records']:
+        bucket_name = record['s3']['bucket']['name']
+        object_key = record['s3']['object']['key']
+        app.logger.info('Bucket: {}, key: {}'.format(bucket_name, object_key))
+        bucket_region = S3.get_bucket_location(
+            Bucket='mo-shub-sns-testing')['LocationConstraint']
+        regional_s3 = boto3.client('s3', region_name=bucket_region)
+        regional_s3.download_file(bucket_name, object_key,
+                                  os.path.join('downloads', object_key))
